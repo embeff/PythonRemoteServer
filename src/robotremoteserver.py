@@ -85,6 +85,7 @@ class RobotRemoteServer(object):
         server.register_function(self.run_keyword)
         server.register_function(self.get_keyword_arguments)
         server.register_function(self.get_keyword_documentation)
+        server.register_function(self.get_library_information)
         server.register_function(self.stop_remote_server)
 
     @property
@@ -185,6 +186,19 @@ class RobotRemoteServer(object):
             return ('Stop the remote server unless stopping is disabled.\n\n'
                     'Return ``True/False`` depending was server stopped or not.')
         return self._library.get_keyword_documentation(name)
+
+    def get_library_information(self):
+        info = dict()
+        for keyword in self.get_keyword_names():
+            info[keyword] = dict(
+                args=self.get_keyword_arguments(keyword),
+                tags=self.get_keyword_tags(keyword),
+                doc=self.get_keyword_documentation(keyword),
+                types=[]
+            )
+        info['__intro__'] = dict(doc=self.get_keyword_documentation('__intro__'))
+        info['__init__'] = dict(doc=self.get_keyword_documentation('__init__'))
+        return info
 
     def get_keyword_tags(self, name):
         if name == 'stop_remote_server':
@@ -308,7 +322,7 @@ class StaticRemoteLibrary(object):
         if __name__ == '__init__':
             return []
         kw = self._get_keyword(name)
-        args, varargs, kwargs, defaults = inspect.getargspec(kw)
+        args, varargs, kwargs, defaults, kwonlyargs, kwonlydefaults, annotations = inspect.getfullargspec(kw)
         if inspect.ismethod(kw):
             args = args[1:]  # drop 'self'
         if defaults:
