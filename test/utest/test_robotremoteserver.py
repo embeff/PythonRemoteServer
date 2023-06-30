@@ -2,6 +2,9 @@
 
 import unittest
 import sys
+import asyncio
+import pickle
+import base64
 
 from robotremoteserver import RobotRemoteServer, RemoteLibraryFactory
 
@@ -10,6 +13,29 @@ class NonServingRemoteServer(RobotRemoteServer):
 
     def __init__(self, library):
         self._library = RemoteLibraryFactory(library)
+        self.remoteCalls = self.RemoteCalls(self._library)
+
+    def get_keyword_names(self) -> list:
+        return asyncio.get_event_loop().run_until_complete(
+            self.remoteCalls.get_keyword_names())
+
+    def get__keyword_arguments(self, name):
+        return asyncio.get_event_loop().run_until_complete(
+            self.remoteCalls.get_keyword_arguments(name))
+
+    def get_keyword_tags(self, name):
+        return asyncio.get_event_loop().run_until_complete(
+            self.remoteCalls.get_keyword_tags(name))
+
+    def get_keyword_documentation(self, name):
+        return asyncio.get_event_loop().run_until_complete(
+            self.remoteCalls.get_keyword_documentation(name))
+
+    def run_keyword(self, name, args=None, kwargs=None):
+        sargs = base64.b64encode(pickle.dumps(args))
+        skwargs = base64.b64encode(pickle.dumps(kwargs))
+        return asyncio.get_event_loop().run_until_complete(
+            self.remoteCalls.run_keyword(name, sargs, skwargs))
 
 
 class StaticLibrary:
@@ -18,7 +44,8 @@ class StaticLibrary:
     def passing_keyword(self):
         pass
 
-    def failing_keyword(self, exception=AssertionError, message='Hello, world!',
+    def failing_keyword(self, exception=AssertionError,
+                        message='Hello, world!',
                         **kwargs):
         err = exception(message)
         for name, value in kwargs.items():
@@ -106,7 +133,8 @@ class TestStaticApi(unittest.TestCase):
     def test_returning_keyword(self):
         for ret in 'Hello, world!', 42, True:
             self.assertEquals(self._run('returning_keyword', ret),
-                              {'status': 'PASS', 'return': ret})
+                              {'status': 'PASS', 'return':
+                               ret if isinstance(ret, int) else "s"+ret})
 
     def test_run_failing_keyword(self):
         ret = self._run('failing_keyword', ValueError)
@@ -152,10 +180,10 @@ class TestStaticApi(unittest.TestCase):
             self.assertEquals(ret.pop('continuable'), True)
         if fatal:
             self.assertEquals(ret.pop('fatal'), True)
-        self.assertEquals(ret, {'error': error, 'status': 'FAIL'})
+        self.assertEquals(ret, {'error': "s"+error, 'status': 'FAIL'})
 
     def _verify_logged(self, ret, output):
-        self.assertEquals(ret, {'output': output, 'status': 'PASS'})
+        self.assertEquals(ret, {'output': "s"+output, 'status': 'PASS'})
         self.assertTrue(all(s.closed for s in self.library.streams))
 
 
