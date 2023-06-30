@@ -45,7 +45,12 @@ Set Pythonpath
 
 Stop Remote Library
     [Arguments]    ${test logging}=True
-    Stop Remote Server In Process
+    TRY
+        Stop Remote Server
+    EXCEPT    AS    ${error_message}
+        Log To Console    Exception occured while stopping remote Server: ${error_message}
+    END
+    # 'Stop Remote Server' stops the server immediately, this always causes an exception to occur since the channel is not properly closed
 
 Server Should Be Stopped And Correct Messages Logged
     [Arguments]    ${test logging}=True
