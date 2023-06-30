@@ -18,25 +18,31 @@ from __future__ import print_function
 import inspect
 import os
 import re
-import select
 import signal
 import sys
-import threading
 import traceback
 
+from fastapi import FastAPI
+from fastapi_websocket_rpc import RpcMethodsBase, WebsocketRPCEndpoint
+import uvicorn
+import base64
+import pickle
+from functools import partial
+import asyncio
+from collections.abc import Iterator
+
 if sys.version_info < (3,):
-    from SimpleXMLRPCServer import SimpleXMLRPCServer
     from StringIO import StringIO
     from xmlrpclib import Binary, ServerProxy
     from collections import Mapping
     PY2, PY3 = True, False
+
     def getfullargspec(func):
         return inspect.getargspec(func) + ([], None, {})
 else:
     from inspect import getfullargspec
     from io import StringIO
     from xmlrpc.client import Binary, ServerProxy
-    from xmlrpc.server import SimpleXMLRPCServer
     from collections.abc import Mapping
     PY2, PY3 = False, True
     unicode = str
@@ -52,7 +58,50 @@ NON_ASCII = re.compile('[\x80-\xff]')
 
 class RobotRemoteServer(object):
 
-    def __init__(self, library, host='127.0.0.1', port=8270, port_file=None,
+    class RemoteCalls(RpcMethodsBase):
+        def __init__(self, lib):
+            self.lib = lib
+
+        async def get_keyword_names(self) -> list:
+            return self.lib.get_keyword_names() + ["stop_remote_server"]
+
+        async def get_keyword_arguments(self, name):
+            if name == 'stop_remote_server':
+                return []
+            return self.lib.get_keyword_arguments(name)
+
+        async def get_keyword_documentation(self, name):
+            if name == 'stop_remote_server':
+                return ('Stop the remote server unless stopping is \
+                        disabled.\n\n' 'Return ``True/False`` depending \
+                            was server stopped or not.')
+            return self.lib.get_keyword_documentation(name)
+
+        async def get_keyword_tags(self, name):
+            if name == 'stop_remote_server':
+                return []
+            return self.lib.get_keyword_tags(name)
+
+        async def get_keyword_types(self, name):
+            pass
+
+        async def run_keyword(self, name="", sArgs=None, sKwargs=None) -> dict:
+            args = pickle.loads(base64.b64decode(sArgs))
+            kwargs = pickle.loads(base64.b64decode(sKwargs))
+            print(f"Calling lib.run_keyword with {args} and {kwargs}")
+
+            if name == 'stop_remote_server':
+                return KeywordRunner(self.stop_remote_server)\
+                    .run_keyword(args, kwargs)
+
+            try:
+                result = await self.lib.run_keyword(name, args, kwargs)
+            except Exception as e:
+                print(f"Exception occured while running a keyword: \
+                      {e} {traceback.extract_tb(e.__traceback__)}")
+            return result
+
+    def __init__(self, library, host='0.0.0.0', port=9000, port_file=None,
                  allow_stop='DEPRECATED', serve=True, allow_remote_stop=True):
         """Configure and start-up remote server.
 
@@ -75,42 +124,35 @@ class RobotRemoteServer(object):
                             ``stop_remote_server`` XML-RPC method.
         """
         self._library = RemoteLibraryFactory(library)
-        self._server = StoppableXMLRPCServer(host, int(port))
-        self._register_functions(self._server)
+        self._app = FastAPI()
+        self._endpoint = \
+            WebsocketRPCEndpoint(self.RemoteCalls(self._library),
+                                 on_disconnect=[self.on_disconnect],
+                                 on_connect=[self.on_connect])
+        self._endpoint.register_route(self._app, "/ws")
+        self._host = host
+        self._port = port if isinstance(port, int) else int(port)
+        print(f"Port: {self._port} is {self._port.__class__.__name__}")
         self._port_file = port_file
-        self._allow_remote_stop = allow_remote_stop \
-                if allow_stop == 'DEPRECATED' else allow_stop
+
         if serve:
             self.serve()
 
-    def _register_functions(self, server):
-        server.register_function(self.get_keyword_names)
-        server.register_function(self.run_keyword)
-        server.register_function(self.get_keyword_arguments)
-        server.register_function(self.get_keyword_documentation)
-        server.register_function(self.stop_remote_server)
+    async def on_connect(self, channel):
+        print(f"Client connected on channel {channel.id}")
+
+    async def on_disconnect(self, channel):
+        print(f"Client disconnected from channel {channel.id}")
 
     @property
     def server_address(self):
         """Server address as a tuple ``(host, port)``."""
-        return self._server.server_address
+        return (self._host, self._port)
 
     @property
     def server_port(self):
-        """Server port as an integer.
-
-        If the initial given port is 0, also this property returns 0 until
-        the server is activated.
-        """
-        return self._server.server_address[1]
-
-    def activate(self):
-        """Bind port and activate the server but do not yet start serving.
-
-        :return  Port number that the server is going to use. This is the
-                 actual port to use, even if the initially given port is 0.
-        """
-        return self._server.activate()
+        """Server port as an integer."""
+        return self._port
 
     def serve(self, log=True):
         """Start the server and wait for it to be stopped.
@@ -133,10 +175,10 @@ class RobotRemoteServer(object):
         is executed in a thread, then it is also possible to stop the server
         using the :meth:`stop` method.
         """
-        self._server.activate()
+
         self._announce_start(log, self._port_file)
-        with SignalHandler(self.stop):
-            self._server.serve()
+        print("Starting Uvicorn")
+        uvicorn.run(self._app, host=self._host, port=self._port)
         self._announce_stop(log, self._port_file)
 
     def _announce_start(self, log, port_file):
@@ -151,83 +193,20 @@ class RobotRemoteServer(object):
             os.remove(port_file)
 
     def _log(self, action, log=True, warn=False):
+        log = False
         if log:
-            address = '%s:%s' % self.server_address
+            address = f"{self.server_address[0]}:{self.server_address[1]}"
             if warn:
                 print('*WARN*', end=' ')
-            print('Robot Framework remote server at %s %s.' % (address, action))
+            print(f"Robot Framework remote server at {address} {action}.")
 
     def stop(self):
         """Stop server."""
-        self._server.stop()
-
-    # Exposed XML-RPC methods. Should they be moved to own class?
+        self._log("Method 'stop' not implemented!", warn=True)
 
     def stop_remote_server(self, log=True):
-        if not self._allow_remote_stop:
-            self._log('does not allow stopping', log, warn=True)
-            return False
         self.stop()
         return True
-
-    def get_keyword_names(self):
-        return self._library.get_keyword_names() + ['stop_remote_server']
-
-    def run_keyword(self, name, args, kwargs=None):
-        if name == 'stop_remote_server':
-            return KeywordRunner(self.stop_remote_server).run_keyword(args, kwargs)
-        return self._library.run_keyword(name, args, kwargs)
-
-    def get_keyword_arguments(self, name):
-        if name == 'stop_remote_server':
-            return []
-        return self._library.get_keyword_arguments(name)
-
-    def get_keyword_documentation(self, name):
-        if name == 'stop_remote_server':
-            return ('Stop the remote server unless stopping is disabled.\n\n'
-                    'Return ``True/False`` depending was server stopped or not.')
-        return self._library.get_keyword_documentation(name)
-
-    def get_keyword_tags(self, name):
-        if name == 'stop_remote_server':
-            return []
-        return self._library.get_keyword_tags(name)
-
-
-class StoppableXMLRPCServer(SimpleXMLRPCServer):
-    allow_reuse_address = True
-
-    def __init__(self, host, port):
-        SimpleXMLRPCServer.__init__(self, (host, port), logRequests=False,
-                                    bind_and_activate=False)
-        self._activated = False
-        self._stopper_thread = None
-
-    def activate(self):
-        if not self._activated:
-            self.server_bind()
-            self.server_activate()
-            self._activated = True
-        return self.server_address[1]
-
-    def serve(self):
-        self.activate()
-        try:
-            self.serve_forever()
-        except select.error:
-            # Signals seem to cause this error with Python 2.6.
-            if sys.version_info[:2] > (2, 6):
-                raise
-        self.server_close()
-        if self._stopper_thread:
-            self._stopper_thread.join()
-            self._stopper_thread = None
-
-    def stop(self):
-        self._stopper_thread = threading.Thread(target=self.shutdown)
-        self._stopper_thread.daemon = True
-        self._stopper_thread.start()
 
 
 class SignalHandler(object):
@@ -298,9 +277,9 @@ class StaticRemoteLibrary(object):
     def get_keyword_names(self):
         return self._names
 
-    def run_keyword(self, name, args, kwargs=None):
+    async def run_keyword(self, name, args, kwargs=None):
         kw = self._get_keyword(name)
-        return KeywordRunner(kw).run_keyword(args, kwargs)
+        return await KeywordRunner(kw).run_keyword(args, kwargs)
 
     def _get_keyword(self, name):
         if name in self._robot_name_index:
@@ -316,11 +295,11 @@ class StaticRemoteLibrary(object):
             args = args[1:]  # drop 'self'
         if defaults:
             args, names = args[:-len(defaults)], args[-len(defaults):]
-            args += ['%s=%s' % (n, d) for n, d in zip(names, defaults)]
+            args += [f"{n}={d}" for n, d in zip(names, defaults)]
         if varargs:
-            args.append('*%s' % varargs)
+            args.append(f"*{varargs}")
         if kwargs:
-            args.append('**%s' % kwargs)
+            args.append(f"**{kwargs}")
         return args
 
     def get_keyword_documentation(self, name):
@@ -377,9 +356,9 @@ class DynamicRemoteLibrary(HybridRemoteLibrary):
         args = getfullargspec(run_keyword)[0]
         return len(args) > 3    # self, name, args, kwargs=None
 
-    def run_keyword(self, name, args, kwargs=None):
+    async def run_keyword(self, name, args, kwargs=None):
         args = [name, args, kwargs] if kwargs else [name, args]
-        return KeywordRunner(self._run_keyword).run_keyword(args)
+        return await KeywordRunner(self._run_keyword).run_keyword(args)
 
     def get_keyword_arguments(self, name):
         if self._get_keyword_arguments:
@@ -404,13 +383,14 @@ class KeywordRunner(object):
     def __init__(self, keyword):
         self._keyword = keyword
 
-    def run_keyword(self, args, kwargs=None):
-        args = self._handle_binary(args)
-        kwargs = self._handle_binary(kwargs or {})
+    async def run_keyword(self, args, kwargs=None):
         result = KeywordResult()
         with StandardStreamInterceptor() as interceptor:
             try:
-                return_value = self._keyword(*args, **kwargs)
+                kw = partial(self._keyword, *args,
+                             **kwargs if kwargs is not None else {})
+                loop = asyncio.get_running_loop()
+                return_value = await loop.run_in_executor(None, kw)
             except Exception:
                 result.set_error(*sys.exc_info())
             else:
@@ -459,7 +439,7 @@ class StandardStreamInterceptor(object):
         if stdout and stderr:
             if not stderr.startswith(('*TRACE*', '*DEBUG*', '*INFO*', '*HTML*',
                                       '*WARN*', '*ERROR*')):
-                stderr = '*INFO* %s' % stderr
+                stderr = f"*INFO* {stderr}"
             if not stdout.endswith('\n'):
                 stdout += '\n'
         self.output = stdout + stderr
@@ -472,33 +452,27 @@ class KeywordResult(object):
         self.data = {'status': 'FAIL'}
 
     def set_error(self, exc_type, exc_value, exc_tb=None):
-        self.data['error'] = self._get_message(exc_type, exc_value)
+        self.data['error'] = \
+            self._handle_return_value(self._get_message(exc_type, exc_value))
         if exc_tb:
-            self.data['traceback'] = self._get_traceback(exc_tb)
+            self.data['traceback'] = \
+                self._handle_return_value(self._get_traceback(exc_tb))
         continuable = self._get_error_attribute(exc_value, 'CONTINUE')
         if continuable:
-            self.data['continuable'] = continuable
+            self.data['continuable'] = self._handle_return_value(continuable)
         fatal = self._get_error_attribute(exc_value, 'EXIT')
         if fatal:
-            self.data['fatal'] = fatal
+            self.data['fatal'] = self._handle_return_value(fatal)
 
     def _get_message(self, exc_type, exc_value):
         name = exc_type.__name__
-        message = self._get_message_from_exception(exc_value)
+        message = str(exc_value)
         if not message:
             return name
         if exc_type in self._generic_exceptions \
                 or getattr(exc_value, 'ROBOT_SUPPRESS_NAME', False):
             return message
-        return '%s: %s' % (name, message)
-
-    def _get_message_from_exception(self, value):
-        # UnicodeError occurs if message contains non-ASCII bytes
-        try:
-            msg = unicode(value)
-        except UnicodeError:
-            msg = ' '.join(self._str(a, handle_binary=False) for a in value.args)
-        return self._handle_binary_result(msg)
+        return f"{name}: {message}"
 
     def _get_traceback(self, exc_tb):
         # Latest entry originates from this module so it can be removed
@@ -507,60 +481,38 @@ class KeywordResult(object):
         return 'Traceback (most recent call last):\n' + trace
 
     def _get_error_attribute(self, exc_value, name):
-        return bool(getattr(exc_value, 'ROBOT_%s_ON_FAILURE' % name, False))
+        return bool(getattr(exc_value, f"ROBOT_{name}_ON_FAILURE", False))
 
     def set_return(self, value):
         value = self._handle_return_value(value)
-        if value != '':
+        if value is not None and value != '':
             self.data['return'] = value
 
     def _handle_return_value(self, ret):
-        if isinstance(ret, (str, unicode, bytes)):
-            return self._handle_binary_result(ret)
-        if isinstance(ret, (int, long, float)):
+        if ret is None:
+            return None
+        if isinstance(ret, (int, float, bool)):
             return ret
+        if isinstance(ret, str):
+            return "s" + ret
+        if isinstance(ret, bytes):
+            return b'b' + base64.b64encode(ret)
         if isinstance(ret, Mapping):
-            return dict((self._str(key), self._handle_return_value(value))
+            return dict((str(key), self._handle_return_value(value))
                         for key, value in ret.items())
+        if isinstance(ret, Iterator):
+            return self._handle_return_value(list(ret))
         try:
             return [self._handle_return_value(item) for item in ret]
         except TypeError:
-            return self._str(ret)
-
-    def _handle_binary_result(self, result):
-        if not self._contains_binary(result):
-            return result
-        if not isinstance(result, bytes):
-            try:
-                result = result.encode('ASCII')
-            except UnicodeError:
-                raise ValueError("Cannot represent %r as binary." % result)
-        # With IronPython Binary cannot be sent if it contains "real" bytes.
-        if sys.platform == 'cli':
-            result = str(result)
-        return Binary(result)
-
-    def _contains_binary(self, result):
-        if PY3:
-            return isinstance(result, bytes) or BINARY.search(result)
-        return (isinstance(result, bytes) and NON_ASCII.search(result) or
-                BINARY.search(result))
-
-    def _str(self, item, handle_binary=True):
-        if item is None:
-            return ''
-        if not isinstance(item, (str, unicode, bytes)):
-            item = unicode(item)
-        if handle_binary:
-            item = self._handle_binary_result(item)
-        return item
+            return self.str(ret)
 
     def set_status(self, status):
         self.data['status'] = status
 
     def set_output(self, output):
         if output:
-            self.data['output'] = self._handle_binary_result(output)
+            self.data['output'] = self._handle_return_value(output)
 
 
 def test_remote_server(uri, log=True):
@@ -574,9 +526,9 @@ def test_remote_server(uri, log=True):
     try:
         ServerProxy(uri).get_keyword_names()
     except Exception:
-        logger('No remote server running at %s.' % uri)
+        logger(f"No remote server running at {uri}.")
         return False
-    logger('Remote server running at %s.' % uri)
+    logger(f"Remote server running at {uri}.")
     return True
 
 
@@ -590,9 +542,9 @@ def stop_remote_server(uri, log=True):
     """
     logger = print if log else lambda message: None
     if not test_remote_server(uri, log=False):
-        logger('No remote server running at %s.' % uri)
+        logger(f"No remote server running at {uri}.")
         return True
-    logger('Stopping remote server at %s.' % uri)
+    logger(f"Stopping remote server at {uri}.")
     if not ServerProxy(uri).stop_remote_server():
         logger('Stopping not allowed!')
         return False
