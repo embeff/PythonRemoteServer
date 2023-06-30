@@ -90,10 +90,8 @@ class RobotRemoteServer(object):
         async def run_keyword(self, name="", sArgs=None, sKwargs=None) -> dict:
             args = pickle.loads(base64.b64decode(sArgs))
             kwargs = pickle.loads(base64.b64decode(sKwargs))
-            print(f"Calling lib.run_keyword on {name} with {args} and {kwargs}")
 
             if name == 'stop_remote_server':
-                print("Executing stop")
                 self.server.stop_remote_server()
 
             try:
