@@ -2,6 +2,7 @@
 Library              OperatingSystem
 Library              Process
 Library              Collections
+Library              resource.py
 
 *** Variables ***
 ${INTERPRETER}       python
@@ -11,27 +12,30 @@ ${SERVER TIMEOUT}    30 seconds
 Start And Import Remote Library
     [Arguments]    ${library}    ${name}=Remote    @{args}
     Set Pythonpath
-    ${port} =    Start Remote Library    ${library}    args=${args}
-    Import Library    Remote    http://127.0.0.1:${port}    WITH NAME    ${name}
+    ${port} =    Start Remote Server    ${library}    args=${args}
     Set Suite Variable    ${ACTIVE PORT}    ${port}
     Set Log Level    DEBUG
+    Import Client
 
-Start Remote Library
-    [Arguments]    ${library}    ${port}=0    ${args}=@{EMPTY}
+Start Remote Server
+    [Arguments]    ${library}    ${port}=9000    ${args}=@{EMPTY}
     @{interpreter} =    Split Command Line    ${INTERPRETER}
     ${library} =        Normalize Path        ${CURDIR}/../libs/${library}
     ${port file} =      Normalize Path        ${CURDIR}/../results/server_port.txt
     ${output} =         Normalize Path        ${CURDIR}/../results/server_output.txt
-    Start Process    @{interpreter}    ${library}    ${port}    ${port file}
-    ...    @{args}    alias=${library}    stdout=${output}    stderr=STDOUT
+
+    ${process} =    Start Remote Library In Process    ${library}    ${port}    ${port file}    args=@{args}    stdoutFile=${output}    stderrFile=STDOUT
+
     TRY
         Wait Until Created    ${port file}    timeout=${SERVER TIMEOUT}
     EXCEPT
-        ${result} =    Wait For Process    timeout=10s    on_timeout=terminate
-        Fail    Starting remote server failed:\n${result.stdout}
+        Fail    Starting remote server failed!
     END
     ${port} =    Get File    ${port file}
     RETURN    ${port}
+
+Import Client
+    Import Library    ${CURDIR}/../../src/embeffRemote.py    ws://localhost:9000/ws
 
 Set Pythonpath
     ${src} =    Normalize Path    ${CURDIR}/../../src
@@ -41,8 +45,7 @@ Set Pythonpath
 
 Stop Remote Library
     [Arguments]    ${test logging}=True
-    Stop Remote Server
-    Server Should Be Stopped And Correct Messages Logged    ${test logging}
+    Stop Remote Server In Process
 
 Server Should Be Stopped And Correct Messages Logged
     [Arguments]    ${test logging}=True
