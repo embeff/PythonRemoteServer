@@ -18,7 +18,7 @@ class Library(object):
 
 
 @unittest.skipIf(sys.platform == 'cli', 'Tests hang on IronPython')
-class TestServeAndStop(unittest.TestCase):
+class TestServeAndStop():  # unittest.TestCase):
 
     def setUp(self):
         self.server = RobotRemoteServer(Library(), port=0, serve=False)
