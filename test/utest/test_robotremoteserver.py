@@ -13,7 +13,7 @@ class NonServingRemoteServer(RobotRemoteServer):
 
     def __init__(self, library):
         self._library = RemoteLibraryFactory(library)
-        self.remoteCalls = self.RemoteCalls(self._library)
+        self.remoteCalls = self.RemoteCalls(self, self._library)
 
     def get_keyword_names(self) -> list:
         return asyncio.get_event_loop().run_until_complete(
