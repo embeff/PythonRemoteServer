@@ -1,7 +1,5 @@
 from subprocess import Popen, STDOUT, CREATE_NEW_CONSOLE
 import os
-from robot.api.logger import console
-from time import sleep
 
 
 process = None
@@ -18,12 +16,11 @@ def start_remote_library_in_process(library, port, portFile, args, stdoutFile, s
 
     global process
     process = Popen(stderr=stderr, stdout=stdout, args=arguments, creationflags=CREATE_NEW_CONSOLE)
-    console(process.pid)
 
     return 0
 
 
-def stop_remote_server_in_process():
+def kill_remote_server_in_process():
     if process is None:
         return
     Popen(["taskkill", "/F", "/PID", str(process.pid)])
