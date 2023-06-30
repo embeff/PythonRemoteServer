@@ -59,7 +59,9 @@ NON_ASCII = re.compile('[\x80-\xff]')
 class RobotRemoteServer(object):
 
     class RemoteCalls(RpcMethodsBase):
-        def __init__(self, lib):
+        def __init__(self, server, lib):
+            self.server = server
+            print(f"server: {server.__class__.__name__}")
             self.lib = lib
 
         async def get_keyword_names(self) -> list:
@@ -88,11 +90,11 @@ class RobotRemoteServer(object):
         async def run_keyword(self, name="", sArgs=None, sKwargs=None) -> dict:
             args = pickle.loads(base64.b64decode(sArgs))
             kwargs = pickle.loads(base64.b64decode(sKwargs))
-            print(f"Calling lib.run_keyword with {args} and {kwargs}")
+            print(f"Calling lib.run_keyword on {name} with {args} and {kwargs}")
 
             if name == 'stop_remote_server':
-                return KeywordRunner(self.stop_remote_server)\
-                    .run_keyword(args, kwargs)
+                print("Executing stop")
+                self.server.stop_remote_server()
 
             try:
                 result = await self.lib.run_keyword(name, args, kwargs)
@@ -126,7 +128,7 @@ class RobotRemoteServer(object):
         self._library = RemoteLibraryFactory(library)
         self._app = FastAPI()
         self._endpoint = \
-            WebsocketRPCEndpoint(self.RemoteCalls(self._library),
+            WebsocketRPCEndpoint(self.RemoteCalls(self, self._library),
                                  on_disconnect=[self.on_disconnect],
                                  on_connect=[self.on_connect])
         self._endpoint.register_route(self._app, "/ws")
@@ -200,13 +202,11 @@ class RobotRemoteServer(object):
                 print('*WARN*', end=' ')
             print(f"Robot Framework remote server at {address} {action}.")
 
-    def stop(self):
-        """Stop server."""
-        self._log("Method 'stop' not implemented!", warn=True)
-
-    def stop_remote_server(self, log=True):
-        self.stop()
-        return True
+    def stop_remote_server(self):
+        try:
+            os.kill(os.getpid(), signal.CTRL_C_EVENT)
+        except Exception as e:
+            print(e)
 
 
 class SignalHandler(object):
