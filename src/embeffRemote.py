@@ -60,19 +60,56 @@ class embeffRemote(object):
 
     @convertToSync
     async def run_keyword(self, name, args, kwargs):
-        pArgs = pickle.dumps(args)
-        pKwargs = pickle.dumps(kwargs)
-        sArgs = base64.b64encode(pArgs)
-        sKwargs = base64.b64encode(pKwargs)
+        args = ArgumentCoercer.coerce(args)
+        kwargs = ArgumentCoercer.coerce(kwargs)
         rpcResult = await self._client.other.run_keyword(name=name,
-                                                         sArgs=sArgs,
-                                                         sKwargs=sKwargs)
+                                                         args=args,
+                                                         kwargs=kwargs)
         resultDict = rpcResult.result
         result = RemoteResult(resultDict)
         if result.status != 'PASS':
             raise RemoteError(result.error, result.traceback, result.fatal,
                               result.continuable)
         return result.return_
+
+
+class ArgumentCoercer:
+    @classmethod
+    def coerce(self, argument):
+        for handles, handler in [(is_string, self._handle_string),
+                                 (is_bytes, self._handle_bytes),
+                                 (is_number, self._pass_through),
+                                 (is_dict_like, self._coerce_dict),
+                                 (is_list_like, self._coerce_list),
+                                 (lambda arg: True, self._to_string)]:
+            if handles(argument):
+                return handler(argument)
+
+    @classmethod
+    def _handle_string(self, arg):
+        return "s" + arg
+
+    @classmethod
+    def _handle_bytes(self, arg):
+        return b'b' + base64.b64encode(arg)
+
+    @classmethod
+    def _pass_through(self, arg):
+        return arg
+
+    @classmethod
+    def _coerce_list(self, arg):
+        return [self.coerce(item) for item in arg]
+
+    @classmethod
+    def _coerce_dict(self, arg):
+        return dict((self._to_string(key),
+                     self.coerce(arg[key])) for key in arg)
+
+    @classmethod
+    def _to_string(self, item):
+        item = safe_str(item) if item is not None else ''
+        return self._handle_string(item)
 
 
 class RemoteResult(object):
