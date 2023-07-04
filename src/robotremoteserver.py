@@ -61,7 +61,6 @@ class RobotRemoteServer(object):
     class RemoteCalls(RpcMethodsBase):
         def __init__(self, server, lib):
             self.server = server
-            print(f"server: {server.__class__.__name__}")
             self.lib = lib
 
         async def get_keyword_names(self) -> list:
@@ -132,7 +131,6 @@ class RobotRemoteServer(object):
         self._endpoint.register_route(self._app, "/ws")
         self._host = host
         self._port = port if isinstance(port, int) else int(port)
-        print(f"Port: {self._port} is {self._port.__class__.__name__}")
         self._port_file = port_file
 
         if serve:
@@ -177,7 +175,6 @@ class RobotRemoteServer(object):
         """
 
         self._announce_start(log, self._port_file)
-        print("Starting Uvicorn")
         uvicorn.run(self._app, host=self._host, port=self._port)
         self._announce_stop(log, self._port_file)
 
