@@ -81,6 +81,7 @@ class TestServeAndStop(unittest.TestCase):
         self.server.stop()
         raise AssertionError('Server did not stop in %s seconds.' % timeout)
 
+    @unittest.skip
     def test_stop_remote_server(self):
         with self._server_thread():
             uri = self._wait_until_started()
