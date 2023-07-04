@@ -26,10 +26,12 @@ from fastapi import FastAPI
 from fastapi_websocket_rpc import RpcMethodsBase, WebsocketRPCEndpoint
 import uvicorn
 import base64
-import pickle
 from functools import partial
 import asyncio
 from collections.abc import Iterator
+
+from robot.utils import (DotDict, is_dict_like, is_list_like, is_number,
+                         is_string, safe_str)
 
 if sys.version_info < (3,):
     from StringIO import StringIO
@@ -86,9 +88,11 @@ class RobotRemoteServer(object):
         async def get_keyword_types(self, name):
             pass
 
-        async def run_keyword(self, name="", sArgs=None, sKwargs=None) -> dict:
-            args = pickle.loads(base64.b64decode(sArgs))
-            kwargs = pickle.loads(base64.b64decode(sKwargs))
+        async def run_keyword(self, name="", args=None, kwargs=None) -> dict:
+            print(f"Got args: {args}, {kwargs}")
+            args = ArgumentDecoercer.decoerce(args)
+            kwargs = ArgumentDecoercer.decoerce(kwargs)
+            print(f"Using args: {args}, {kwargs}")
 
             if name == 'stop_remote_server':
                 self.server.stop_remote_server()
@@ -98,6 +102,7 @@ class RobotRemoteServer(object):
             except Exception as e:
                 print(f"Exception occured while running a keyword: \
                       {e} {traceback.extract_tb(e.__traceback__)}")
+            print(f"Ran keyword: {result}")
             return result
 
     def __init__(self, library, host='0.0.0.0', port=9000, port_file=None,
@@ -508,6 +513,45 @@ class KeywordResult(object):
     def set_output(self, output):
         if output:
             self.data['output'] = self._handle_return_value(output)
+
+
+class ArgumentDecoercer:
+    @classmethod
+    def decoerce(self, argument):
+        for handles, handler in [(is_string, self._handle_string),
+                                 (is_number, self._pass_through),
+                                 (is_dict_like, self._decoerce_dict),
+                                 (is_list_like, self._decoerce_list),
+                                 (lambda arg: True, self._to_string)]:
+            if handles(argument):
+                return handler(argument)
+
+    @classmethod
+    def _handle_string(self, arg):
+        if len(arg) == 0:
+            return ''
+        if arg[0] == "s":
+            return arg[1:]
+        elif arg[0] == "b":
+            return base64.b64decode(arg[1:])
+
+    @classmethod
+    def _pass_through(self, arg):
+        return arg
+
+    @classmethod
+    def _decoerce_dict(self, arg):
+        return DotDict((self.decoerce(key), self.decoerce(value))
+                       for key, value in arg.items())
+
+    @classmethod
+    def _decoerce_list(self, arg):
+        return [self.decoerce(value) for value in arg]
+
+    @classmethod
+    def _to_string(self, item):
+        item = safe_str(item) if item is not None else ''
+        return self._handle_string(item)
 
 
 def test_remote_server(uri, log=True):
