@@ -3,7 +3,7 @@ Documentation     These tests actually test the Remote library more than the rem
 Resource          resource.robot
 Variables         arguments.py
 Suite Setup       Start And Import Remote Library    Arguments.py
-Suite Teardown    Stop Remote Library
+#Suite Teardown    Stop Remote Library
 Test Template     Argument Should Be Correct
 
 *** Test Cases ***
