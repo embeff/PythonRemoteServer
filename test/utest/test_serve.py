@@ -18,11 +18,12 @@ class Library(object):
 
 
 @unittest.skipIf(sys.platform == 'cli', 'Tests hang on IronPython')
-class TestServeAndStop():  # unittest.TestCase):
+class TestServeAndStop(unittest.TestCase):
 
     def setUp(self):
         self.server = RobotRemoteServer(Library(), port=0, serve=False)
 
+    @unittest.skip
     def test_serve(self):
         self.assertEqual(self.server.server_port, 0)
         with self._server_thread():
@@ -34,6 +35,7 @@ class TestServeAndStop():  # unittest.TestCase):
             self._wait_until_stopped(uri)
             self.assertEqual(test_remote_server(uri, log=False), False)
 
+    @unittest.skip
     def test_activate(self):
         port = self.server.activate()
         self.assertNotEqual(port, 0)
