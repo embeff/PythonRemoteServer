@@ -3,10 +3,9 @@
 import unittest
 import sys
 import asyncio
-import pickle
-import base64
 
 from robotremoteserver import RobotRemoteServer, RemoteLibraryFactory
+from embeffRemote import ArgumentCoercer
 
 
 class NonServingRemoteServer(RobotRemoteServer):
@@ -32,10 +31,11 @@ class NonServingRemoteServer(RobotRemoteServer):
             self.remoteCalls.get_keyword_documentation(name))
 
     def run_keyword(self, name, args=None, kwargs=None):
-        sargs = base64.b64encode(pickle.dumps(args))
-        skwargs = base64.b64encode(pickle.dumps(kwargs))
+        args = ArgumentCoercer.coerce(args)
+        kwargs = ArgumentCoercer.coerce(kwargs)
+
         return asyncio.get_event_loop().run_until_complete(
-            self.remoteCalls.run_keyword(name, sargs, skwargs))
+            self.remoteCalls.run_keyword(name, args, kwargs))
 
 
 class StaticLibrary:
@@ -47,6 +47,20 @@ class StaticLibrary:
     def failing_keyword(self, exception=AssertionError,
                         message='Hello, world!',
                         **kwargs):
+
+        if isinstance(exception, str):
+            exception = exception.split('\'')[1]
+            if exception == "AssertionError":
+                exception = AssertionError
+            elif exception == "ValueError":
+                exception = ValueError
+            elif exception == "RuntimeError":
+                exception = RuntimeError
+            elif exception == "Exception":
+                exception = Exception
+            else:
+                print(f"Exception {exception} not found!")
+
         err = exception(message)
         for name, value in kwargs.items():
             setattr(err, name, value)
