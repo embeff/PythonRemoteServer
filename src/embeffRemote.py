@@ -79,8 +79,6 @@ class embeffRemote(object):
 class RemoteResult(object):
 
     def __init__(self, result):
-        logger
-        logger.console(f"Received: {result}")
         if not (isinstance(result, Mapping) and 'status' in result):
             raise RuntimeError(f'Invalid remote result dictionary: \
                                {result.__class__.__name__}')
