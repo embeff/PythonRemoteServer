@@ -79,4 +79,4 @@ Argument Should Be Correct
      ${expected} =    Set Variable If    $expected    ${expected}    ${argument}
      ${ns} =    Create Dictionary    MyObject=${MyObject}
      ${argument} =    Evaluate    ${argument}    namespace=${ns}
-     Remote.Argument Should Be Correct    ${argument}    ${expected}
+     embeffRemote.Argument Should Be Correct    ${argument}    ${expected}
