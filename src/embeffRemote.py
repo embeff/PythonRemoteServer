@@ -1,14 +1,13 @@
 import asyncio
 from fastapi_websocket_rpc import RpcMethodsBase, WebSocketRpcClient
-import pickle
 import base64
 from collections.abc import Mapping
 from unicodedata import normalize
-from collections.abc import Iterable
-from collections import OrderedDict
 from robot.errors import RemoteError
 from functools import wraps
 from robot.api import logger
+from robot.utils import (DotDict, is_bytes, is_dict_like, is_list_like,
+                         is_number, is_string, safe_str)
 
 
 def convertToSync(f):
@@ -119,12 +118,6 @@ class RemoteResult(object):
             raise ValueError
 
 
-def is_list_like(item):
-    if isinstance(item, (str, bytes, bytearray)):
-        return False
-    return isinstance(item, Iterable)
-
-
 def unic(item):
     item = _unic(item)
     try:
@@ -150,55 +143,3 @@ def _unic(item):
 
 def _unrepresentable_object(item):
     return None
-
-
-class DotDict(OrderedDict):
-
-    def __init__(self, *args, **kwds):
-        args = [self._convert_nested_initial_dicts(a) for a in args]
-        kwds = self._convert_nested_initial_dicts(kwds)
-        OrderedDict.__init__(self, *args, **kwds)
-
-    def _convert_nested_initial_dicts(self, value):
-        items = value.items() if isinstance(value, Mapping) else value
-        return OrderedDict((key, self._convert_nested_dicts(value))
-                           for key, value in items)
-
-    def _convert_nested_dicts(self, value):
-        if isinstance(value, DotDict):
-            return value
-        if isinstance(value, Mapping):
-            return DotDict(value)
-        if isinstance(value, list):
-            value[:] = [self._convert_nested_dicts(item) for item in value]
-        return value
-
-    def __getattr__(self, key):
-        try:
-            return self[key]
-        except KeyError:
-            raise AttributeError(key)
-
-    def __setattr__(self, key, value):
-        if not key.startswith('_OrderedDict__'):
-            self[key] = value
-        else:
-            OrderedDict.__setattr__(self, key, value)
-
-    def __delattr__(self, key):
-        try:
-            self.pop(key)
-        except KeyError:
-            OrderedDict.__delattr__(self, key)
-
-    def __eq__(self, other):
-        return dict.__eq__(self, other)
-
-    def __ne__(self, other):
-        return not self == other
-
-    def __str__(self):
-        return '{%s}' % ', '.join('%r: %r' % (key, self[key]) for key in self)
-
-    # Must use original dict.__repr__ to allow customising PrettyPrinter.
-    __repr__ = dict.__repr__
