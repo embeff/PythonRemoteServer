@@ -89,10 +89,8 @@ class RobotRemoteServer(object):
             pass
 
         async def run_keyword(self, name="", args=None, kwargs=None) -> dict:
-            print(f"Got args: {args}, {kwargs}")
             args = ArgumentDecoercer.decoerce(args)
             kwargs = ArgumentDecoercer.decoerce(kwargs)
-            print(f"Using args: {args}, {kwargs}")
 
             if name == 'stop_remote_server':
                 self.server.stop_remote_server()
@@ -102,7 +100,6 @@ class RobotRemoteServer(object):
             except Exception as e:
                 print(f"Exception occured while running a keyword: \
                       {e} {traceback.extract_tb(e.__traceback__)}")
-            print(f"Ran keyword: {result}")
             return result
 
     def __init__(self, library, host='0.0.0.0', port=9000, port_file=None,
