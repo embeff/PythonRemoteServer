@@ -74,7 +74,7 @@ class RobotRemoteServer(object):
                             ``Stop Remote Server`` keyword and
                             ``stop_remote_server`` XML-RPC method.
         """
-        self._library = RemoteLibraryFactory(library)
+        self._library = RemoteLibraryFactory(library, binary_cls=Binary)
         self._server = StoppableXMLRPCServer(host, int(port))
         self._register_functions(self._server)
         self._port_file = port_file
@@ -265,16 +265,16 @@ class SignalHandler(object):
             signal.signal(getattr(signal, name), handler)
 
 
-def RemoteLibraryFactory(library):
+def RemoteLibraryFactory(library, binary_cls):
     if inspect.ismodule(library):
-        return StaticRemoteLibrary(library)
+        return StaticRemoteLibrary(library, binary_cls)
     get_keyword_names = dynamic_method(library, 'get_keyword_names')
     if not get_keyword_names:
-        return StaticRemoteLibrary(library)
+        return StaticRemoteLibrary(library, binary_cls)
     run_keyword = dynamic_method(library, 'run_keyword')
     if not run_keyword:
-        return HybridRemoteLibrary(library, get_keyword_names)
-    return DynamicRemoteLibrary(library, get_keyword_names, run_keyword)
+        return HybridRemoteLibrary(library, get_keyword_names, binary_cls)
+    return DynamicRemoteLibrary(library, get_keyword_names, run_keyword, binary_cls=binary_cls)
 
 
 def dynamic_method(library, underscore_name):
@@ -293,7 +293,8 @@ def is_function_or_method(item):
 
 class StaticRemoteLibrary(object):
 
-    def __init__(self, library):
+    def __init__(self, library, binary_cls):
+        self._binary_cls = binary_cls
         self._library = library
         self._names, self._robot_name_index = self._get_keyword_names(library)
 
@@ -314,7 +315,7 @@ class StaticRemoteLibrary(object):
 
     def run_keyword(self, name, args, kwargs=None):
         kw = self._get_keyword(name)
-        return KeywordRunner(kw).run_keyword(args, kwargs)
+        return KeywordRunner(kw, binary_cls=self._binary_cls).run_keyword(args, kwargs)
 
     def _get_keyword(self, name):
         if name in self._robot_name_index:
@@ -369,15 +370,16 @@ class StaticRemoteLibrary(object):
 
 class HybridRemoteLibrary(StaticRemoteLibrary):
 
-    def __init__(self, library, get_keyword_names):
-        StaticRemoteLibrary.__init__(self, library)
+    def __init__(self, library, get_keyword_names, binary_cls):
+        StaticRemoteLibrary.__init__(self, library, binary_cls)
         self.get_keyword_names = get_keyword_names
 
 
 class DynamicRemoteLibrary(HybridRemoteLibrary):
 
-    def __init__(self, library, get_keyword_names, run_keyword):
+    def __init__(self, library, get_keyword_names, run_keyword, binary_cls):
         HybridRemoteLibrary.__init__(self, library, get_keyword_names)
+        self._binary_cls = binary_cls
         self._run_keyword = run_keyword
         self._supports_kwargs = self._get_kwargs_support(run_keyword)
         self._get_keyword_arguments \
@@ -393,7 +395,7 @@ class DynamicRemoteLibrary(HybridRemoteLibrary):
 
     def run_keyword(self, name, args, kwargs=None):
         args = [name, args, kwargs] if kwargs else [name, args]
-        return KeywordRunner(self._run_keyword).run_keyword(args)
+        return KeywordRunner(self._run_keyword, binary_cls=self._binary_cls).run_keyword(args)
 
     def get_keyword_arguments(self, name):
         if self._get_keyword_arguments:
@@ -415,13 +417,14 @@ class DynamicRemoteLibrary(HybridRemoteLibrary):
 
 class KeywordRunner(object):
 
-    def __init__(self, keyword):
+    def __init__(self, keyword, binary_cls):
         self._keyword = keyword
+        self._binary_cls = binary_cls
 
     def run_keyword(self, args, kwargs=None):
         args = self._handle_binary(args)
         kwargs = self._handle_binary(kwargs or {})
-        result = KeywordResult()
+        result = KeywordResult(binary_cls=self._binary_cls)
         with StandardStreamInterceptor() as interceptor:
             try:
                 return_value = self._keyword(*args, **kwargs)
@@ -445,7 +448,7 @@ class KeywordRunner(object):
             return [self._handle_binary(item) for item in arg]
         if isinstance(arg, dict):
             return dict((key, self._handle_binary(arg[key])) for key in arg)
-        if isinstance(arg, Binary):
+        if isinstance(arg, self._binary_cls):
             return arg.data
         return arg
 
@@ -482,8 +485,9 @@ class StandardStreamInterceptor(object):
 class KeywordResult(object):
     _generic_exceptions = (AssertionError, RuntimeError, Exception)
 
-    def __init__(self):
+    def __init__(self, binary_cls):
         self.data = {'status': 'FAIL'}
+        self._binary_cls = binary_cls
 
     def set_error(self, exc_type, exc_value, exc_tb=None):
         self.data['error'] = self._get_message(exc_type, exc_value)
@@ -552,7 +556,7 @@ class KeywordResult(object):
         # With IronPython Binary cannot be sent if it contains "real" bytes.
         if sys.platform == 'cli':
             result = str(result)
-        return Binary(result)
+        return self._binary_cls(result)
 
     def _contains_binary(self, result):
         if PY3:
