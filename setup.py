@@ -31,7 +31,7 @@ with open(join(CURDIR, 'README.rst')) as readme:
 
 
 setup(
-    name             = NAME,
+    name             = NAME + "-embeff",
     version          = VERSION,
     author           = u'Pekka Kl\xe4rck and contributors',
     author_email     = 'robotframework@gmail.com',
