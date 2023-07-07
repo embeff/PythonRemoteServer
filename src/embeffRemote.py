@@ -1,4 +1,3 @@
-import asyncio
 from fastapi_websocket_rpc import RpcMethodsBase, WebSocketRpcClient
 
 from robot.errors import RemoteError
@@ -6,6 +5,7 @@ from functools import wraps
 from robot.api import logger
 from robot.utils import (DotDict, is_bytes, is_dict_like, is_list_like,
                          is_number, is_string, safe_str)
+from robot.running.context import EXECUTION_CONTEXTS
 
 import re
 
@@ -15,7 +15,19 @@ from ws_common import Binary, RobotSerializingWebSocket
 def convertToSync(f):
     @wraps(f)
     def wrapper(*args, **kwargs):
-        return asyncio.get_event_loop().run_until_complete(f(*args, **kwargs))
+        runner = f(*args, **kwargs)
+
+        context = EXECUTION_CONTEXTS.current
+        if context is not None:
+            if context.asynchronous.is_loop_required(runner):
+                loop = context.asynchronous.event_loop
+
+                if loop.is_running():
+                    return loop.create_task(runner)
+                else:
+                    return loop.run_until_complete(runner)
+        else:
+            raise Exception("Context not available")
     return wrapper
 
 
