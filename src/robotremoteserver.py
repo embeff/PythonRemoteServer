@@ -33,9 +33,11 @@ from collections.abc import Iterator
 from robot.utils import (DotDict, is_dict_like, is_list_like, is_number,
                          is_string, safe_str)
 
+from ws_common import RobotSerializingWebSocket, Binary
+
 if sys.version_info < (3,):
     from StringIO import StringIO
-    from xmlrpclib import Binary, ServerProxy
+    from xmlrpclib import ServerProxy
     from collections import Mapping
     PY2, PY3 = True, False
 
@@ -44,7 +46,7 @@ if sys.version_info < (3,):
 else:
     from inspect import getfullargspec
     from io import StringIO
-    from xmlrpc.client import Binary, ServerProxy
+    from xmlrpc.client import ServerProxy
     from collections.abc import Mapping
     PY2, PY3 = False, True
     unicode = str
@@ -89,14 +91,10 @@ class RobotRemoteServer(object):
             pass
 
         async def run_keyword(self, name="", args=None, kwargs=None) -> dict:
-            args = ArgumentDecoercer.decoerce(args)
-            kwargs = ArgumentDecoercer.decoerce(kwargs)
-
             if name == 'stop_remote_server':
                 self.server.stop_remote_server()
-
             try:
-                result = await self.lib.run_keyword(name, args, kwargs)
+                result = self.lib.run_keyword(name, args, kwargs)
             except Exception as e:
                 print(f"Exception occured while running a keyword: \
                       {e} {traceback.extract_tb(e.__traceback__)}")
@@ -128,6 +126,7 @@ class RobotRemoteServer(object):
         self._app = FastAPI()
         self._endpoint = \
             WebsocketRPCEndpoint(self.RemoteCalls(self, self._library),
+                                 serializing_socket_cls=RobotSerializingWebSocket,
                                  on_disconnect=[self.on_disconnect],
                                  on_connect=[self.on_connect])
         self._endpoint.register_route(self._app, "/ws")
@@ -206,6 +205,7 @@ class RobotRemoteServer(object):
             print(e)
 
 
+
 class SignalHandler(object):
 
     def __init__(self, handler):
@@ -274,9 +274,9 @@ class StaticRemoteLibrary(object):
     def get_keyword_names(self):
         return self._names
 
-    async def run_keyword(self, name, args, kwargs=None):
+    def run_keyword(self, name, args, kwargs=None):
         kw = self._get_keyword(name)
-        return await KeywordRunner(kw).run_keyword(args, kwargs)
+        return KeywordRunner(kw).run_keyword(args, kwargs)
 
     def _get_keyword(self, name):
         if name in self._robot_name_index:
@@ -292,11 +292,11 @@ class StaticRemoteLibrary(object):
             args = args[1:]  # drop 'self'
         if defaults:
             args, names = args[:-len(defaults)], args[-len(defaults):]
-            args += [f"{n}={d}" for n, d in zip(names, defaults)]
+            args += ['%s=%s' % (n, d) for n, d in zip(names, defaults)]
         if varargs:
-            args.append(f"*{varargs}")
+            args.append('*%s' % varargs)
         if kwargs:
-            args.append(f"**{kwargs}")
+            args.append('**%s' % kwargs)
         return args
 
     def get_keyword_documentation(self, name):
@@ -353,9 +353,9 @@ class DynamicRemoteLibrary(HybridRemoteLibrary):
         args = getfullargspec(run_keyword)[0]
         return len(args) > 3    # self, name, args, kwargs=None
 
-    async def run_keyword(self, name, args, kwargs=None):
+    def run_keyword(self, name, args, kwargs=None):
         args = [name, args, kwargs] if kwargs else [name, args]
-        return await KeywordRunner(self._run_keyword).run_keyword(args)
+        return KeywordRunner(self._run_keyword).run_keyword(args)
 
     def get_keyword_arguments(self, name):
         if self._get_keyword_arguments:
@@ -380,14 +380,13 @@ class KeywordRunner(object):
     def __init__(self, keyword):
         self._keyword = keyword
 
-    async def run_keyword(self, args, kwargs=None):
+    def run_keyword(self, args, kwargs=None):
+        args = self._handle_binary(args)
+        kwargs = self._handle_binary(kwargs or {})
         result = KeywordResult()
         with StandardStreamInterceptor() as interceptor:
             try:
-                kw = partial(self._keyword, *args,
-                             **kwargs if kwargs is not None else {})
-                loop = asyncio.get_running_loop()
-                return_value = await loop.run_in_executor(None, kw)
+                return_value = self._keyword(*args, **kwargs)
             except Exception:
                 result.set_error(*sys.exc_info())
             else:
@@ -436,7 +435,7 @@ class StandardStreamInterceptor(object):
         if stdout and stderr:
             if not stderr.startswith(('*TRACE*', '*DEBUG*', '*INFO*', '*HTML*',
                                       '*WARN*', '*ERROR*')):
-                stderr = f"*INFO* {stderr}"
+                stderr = '*INFO* %s' % stderr
             if not stdout.endswith('\n'):
                 stdout += '\n'
         self.output = stdout + stderr
@@ -449,27 +448,33 @@ class KeywordResult(object):
         self.data = {'status': 'FAIL'}
 
     def set_error(self, exc_type, exc_value, exc_tb=None):
-        self.data['error'] = \
-            self._handle_return_value(self._get_message(exc_type, exc_value))
+        self.data['error'] = self._get_message(exc_type, exc_value)
         if exc_tb:
-            self.data['traceback'] = \
-                self._handle_return_value(self._get_traceback(exc_tb))
+            self.data['traceback'] = self._get_traceback(exc_tb)
         continuable = self._get_error_attribute(exc_value, 'CONTINUE')
         if continuable:
-            self.data['continuable'] = self._handle_return_value(continuable)
+            self.data['continuable'] = continuable
         fatal = self._get_error_attribute(exc_value, 'EXIT')
         if fatal:
-            self.data['fatal'] = self._handle_return_value(fatal)
+            self.data['fatal'] = fatal
 
     def _get_message(self, exc_type, exc_value):
         name = exc_type.__name__
-        message = str(exc_value)
+        message = self._get_message_from_exception(exc_value)
         if not message:
             return name
         if exc_type in self._generic_exceptions \
                 or getattr(exc_value, 'ROBOT_SUPPRESS_NAME', False):
             return message
-        return f"{name}: {message}"
+        return '%s: %s' % (name, message)
+
+    def _get_message_from_exception(self, value):
+        # UnicodeError occurs if message contains non-ASCII bytes
+        try:
+            msg = unicode(value)
+        except UnicodeError:
+            msg = ' '.join(self._str(a, handle_binary=False) for a in value.args)
+        return self._handle_binary_result(msg)
 
     def _get_traceback(self, exc_tb):
         # Latest entry originates from this module so it can be removed
@@ -478,77 +483,60 @@ class KeywordResult(object):
         return 'Traceback (most recent call last):\n' + trace
 
     def _get_error_attribute(self, exc_value, name):
-        return bool(getattr(exc_value, f"ROBOT_{name}_ON_FAILURE", False))
+        return bool(getattr(exc_value, 'ROBOT_%s_ON_FAILURE' % name, False))
 
     def set_return(self, value):
         value = self._handle_return_value(value)
-        if value is not None and value != '':
+        if value != '':
             self.data['return'] = value
 
     def _handle_return_value(self, ret):
-        if ret is None:
-            return None
-        if isinstance(ret, (int, float, bool)):
+        if isinstance(ret, (str, unicode, bytes)):
+            return self._handle_binary_result(ret)
+        if isinstance(ret, (int, long, float)):
             return ret
-        if isinstance(ret, str):
-            return "s" + ret
-        if isinstance(ret, bytes):
-            return b'b' + base64.b64encode(ret)
         if isinstance(ret, Mapping):
-            return dict((str(key), self._handle_return_value(value))
+            return dict((self._str(key), self._handle_return_value(value))
                         for key, value in ret.items())
-        if isinstance(ret, Iterator):
-            return self._handle_return_value(list(ret))
         try:
             return [self._handle_return_value(item) for item in ret]
         except TypeError:
-            return self.str(ret)
+            return self._str(ret)
+
+    def _handle_binary_result(self, result):
+        if not self._contains_binary(result):
+            return result
+        if not isinstance(result, bytes):
+            try:
+                result = result.encode('ASCII')
+            except UnicodeError:
+                raise ValueError("Cannot represent %r as binary." % result)
+        # With IronPython Binary cannot be sent if it contains "real" bytes.
+        if sys.platform == 'cli':
+            result = str(result)
+        return Binary(result)
+
+    def _contains_binary(self, result):
+        if PY3:
+            return isinstance(result, bytes) or BINARY.search(result)
+        return (isinstance(result, bytes) and NON_ASCII.search(result) or
+                BINARY.search(result))
+
+    def _str(self, item, handle_binary=True):
+        if item is None:
+            return ''
+        if not isinstance(item, (str, unicode, bytes)):
+            item = unicode(item)
+        if handle_binary:
+            item = self._handle_binary_result(item)
+        return item
 
     def set_status(self, status):
         self.data['status'] = status
 
     def set_output(self, output):
         if output:
-            self.data['output'] = self._handle_return_value(output)
-
-
-class ArgumentDecoercer:
-    @classmethod
-    def decoerce(self, argument):
-        for handles, handler in [(is_string, self._handle_string),
-                                 (is_number, self._pass_through),
-                                 (is_dict_like, self._decoerce_dict),
-                                 (is_list_like, self._decoerce_list),
-                                 (lambda arg: True, self._to_string)]:
-            if handles(argument):
-                return handler(argument)
-
-    @classmethod
-    def _handle_string(self, arg):
-        if len(arg) == 0:
-            return ''
-        if arg[0] == "s":
-            return arg[1:]
-        elif arg[0] == "b":
-            return base64.b64decode(arg[1:])
-
-    @classmethod
-    def _pass_through(self, arg):
-        return arg
-
-    @classmethod
-    def _decoerce_dict(self, arg):
-        return DotDict((self.decoerce(key), self.decoerce(value))
-                       for key, value in arg.items())
-
-    @classmethod
-    def _decoerce_list(self, arg):
-        return [self.decoerce(value) for value in arg]
-
-    @classmethod
-    def _to_string(self, item):
-        item = safe_str(item) if item is not None else ''
-        return self._handle_string(item)
+            self.data['output'] = self._handle_binary_result(output)
 
 
 def test_remote_server(uri, log=True):
@@ -562,9 +550,9 @@ def test_remote_server(uri, log=True):
     try:
         ServerProxy(uri).get_keyword_names()
     except Exception:
-        logger(f"No remote server running at {uri}.")
+        logger('No remote server running at %s.' % uri)
         return False
-    logger(f"Remote server running at {uri}.")
+    logger('Remote server running at %s.' % uri)
     return True
 
 
@@ -578,9 +566,9 @@ def stop_remote_server(uri, log=True):
     """
     logger = print if log else lambda message: None
     if not test_remote_server(uri, log=False):
-        logger(f"No remote server running at {uri}.")
+        logger('No remote server running at %s.' % uri)
         return True
-    logger(f"Stopping remote server at {uri}.")
+    logger('Stopping remote server at %s.' % uri)
     if not ServerProxy(uri).stop_remote_server():
         logger('Stopping not allowed!')
         return False

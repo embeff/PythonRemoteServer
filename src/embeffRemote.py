@@ -1,13 +1,15 @@
 import asyncio
 from fastapi_websocket_rpc import RpcMethodsBase, WebSocketRpcClient
-import base64
-from collections.abc import Mapping
-from unicodedata import normalize
+
 from robot.errors import RemoteError
 from functools import wraps
 from robot.api import logger
 from robot.utils import (DotDict, is_bytes, is_dict_like, is_list_like,
                          is_number, is_string, safe_str)
+
+import re
+
+from ws_common import Binary, RobotSerializingWebSocket
 
 
 def convertToSync(f):
@@ -33,7 +35,9 @@ class embeffRemote(object):
 
     @convertToSync
     async def createClient(self, uri):
-        client = WebSocketRpcClient(uri, RpcMethodsBase())
+        client = WebSocketRpcClient(uri, 
+                                    RpcMethodsBase(),
+                                    serializing_socket_cls=RobotSerializingWebSocket)
         result = await client.__aenter__()
         return result
 
@@ -60,8 +64,9 @@ class embeffRemote(object):
 
     @convertToSync
     async def run_keyword(self, name, args, kwargs):
-        args = ArgumentCoercer.coerce(args)
-        kwargs = ArgumentCoercer.coerce(kwargs)
+        coercer = ArgumentCoercer()
+        args = coercer.coerce(args)
+        kwargs = coercer.coerce(kwargs)
         rpcResult = await self._client.other.run_keyword(name=name,
                                                          args=args,
                                                          kwargs=kwargs)
@@ -74,7 +79,9 @@ class embeffRemote(object):
 
 
 class ArgumentCoercer:
-    @classmethod
+    binary = re.compile('[\x00-\x08\x0B\x0C\x0E-\x1F]')
+    non_ascii = re.compile('[\x80-\xff]')
+
     def coerce(self, argument):
         for handles, handler in [(is_string, self._handle_string),
                                  (is_bytes, self._handle_bytes),
@@ -85,44 +92,60 @@ class ArgumentCoercer:
             if handles(argument):
                 return handler(argument)
 
-    @classmethod
     def _handle_string(self, arg):
-        return "s" + arg
+        if self._string_contains_binary(arg):
+            return self._handle_binary_in_string(arg)
+        return arg
 
-    @classmethod
+    def _string_contains_binary(self, arg):
+        return (self.binary.search(arg) or
+                is_bytes(arg) and self.non_ascii.search(arg))
+
+    def _handle_binary_in_string(self, arg):
+        try:
+            if not is_bytes(arg):
+                # Map Unicode code points to bytes directly
+                arg = arg.encode('latin-1')
+        except UnicodeError:
+            raise ValueError('Cannot represent %r as binary.' % arg)
+        return Binary(arg)
+
     def _handle_bytes(self, arg):
-        return b'b' + base64.b64encode(arg)
+        return Binary(arg)
 
-    @classmethod
     def _pass_through(self, arg):
         return arg
 
-    @classmethod
     def _coerce_list(self, arg):
         return [self.coerce(item) for item in arg]
 
-    @classmethod
     def _coerce_dict(self, arg):
-        return dict((self._to_string(key),
-                     self.coerce(arg[key])) for key in arg)
+        return dict((self._to_key(key), self.coerce(arg[key])) for key in arg)
 
-    @classmethod
+    def _to_key(self, item):
+        item = self._to_string(item)
+        self._validate_key(item)
+        return item
+
     def _to_string(self, item):
         item = safe_str(item) if item is not None else ''
         return self._handle_string(item)
 
+    def _validate_key(self, key):
+        if isinstance(key, Binary):
+            raise ValueError('Dictionary keys cannot be binary. Got %r.' % (key.data,))
 
-class RemoteResult(object):
+
+class RemoteResult:
 
     def __init__(self, result):
-        if not (isinstance(result, Mapping) and 'status' in result):
-            raise RuntimeError(f'Invalid remote result dictionary: \
-                               {result.__class__.__name__}')
+        if not (is_dict_like(result) and 'status' in result):
+            raise RuntimeError('Invalid remote result dictionary: %s' % result)
         self.status = result['status']
-        self.output = unic(self._get(result, 'output'))
+        self.output = safe_str(self._get(result, 'output'))
         self.return_ = self._get(result, 'return')
-        self.error = unic(self._get(result, 'error'))
-        self.traceback = unic(self._get(result, 'traceback'))
+        self.error = safe_str(self._get(result, 'error'))
+        self.traceback = safe_str(self._get(result, 'traceback'))
         self.fatal = bool(self._get(result, 'fatal', False))
         self.continuable = bool(self._get(result, 'continuable', False))
 
@@ -131,52 +154,11 @@ class RemoteResult(object):
         return self._convert(value)
 
     def _convert(self, value):
-        if value is None:
-            return None
-        if isinstance(value, (int, float, bool)):
-            return value
-        if isinstance(value, str):
-            return self._convertString(value)
-        if isinstance(value, Mapping):
+        if isinstance(value, Binary):
+            return bytes(value.data)
+        if is_dict_like(value):
             return DotDict((k, self._convert(v)) for k, v in value.items())
         if is_list_like(value):
             return [self._convert(v) for v in value]
         return value
 
-    def _convertString(self, value):
-        if len(value) == 0:
-            return ''
-        if value[0] == "s":
-            return value[1:]
-        elif value[0] == "b":
-            return base64.b64decode(value[1:])
-        else:
-            logger.console(f"Got wrong byte/string format: {value}")
-            raise ValueError
-
-
-def unic(item):
-    item = _unic(item)
-    try:
-        return normalize('NFC', item)
-    except ValueError:
-        # https://github.com/IronLanguages/ironpython2/issues/628
-        return item
-
-
-def _unic(item):
-    if isinstance(item, str):
-        return item
-    if isinstance(item, (bytes, bytearray)):
-        try:
-            return item.decode('ASCII')
-        except UnicodeError:
-            return ''.join(chr(b) if b < 128 else '\\x%x' % b for b in item)
-    try:
-        return str(item)
-    except Exception:
-        return _unrepresentable_object(item)
-
-
-def _unrepresentable_object(item):
-    return None
